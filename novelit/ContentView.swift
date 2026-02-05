@@ -5,8 +5,141 @@
 //  Created by 村崎聖仁 on 2026/01/23.
 //
 
+import AuthenticationServices
+import Combine
 import SwiftUI
 import SwiftData
+
+protocol AppleSignInVerifying {
+    func verify(appleUserId: String) async -> AppleSignInVerification
+}
+
+struct AppleIDCredentialStateVerifier: AppleSignInVerifying {
+    func verify(appleUserId: String) async -> AppleSignInVerification {
+        await withCheckedContinuation { continuation in
+            ASAuthorizationAppleIDProvider().getCredentialState(forUserID: appleUserId) { credentialState, _ in
+                switch credentialState {
+                case .authorized:
+                    continuation.resume(returning: .authorized)
+                case .revoked, .notFound, .transferred:
+                    continuation.resume(returning: .unauthorized)
+                @unknown default:
+                    continuation.resume(returning: .unauthorized)
+                }
+            }
+        }
+    }
+}
+
+@MainActor
+final class RootViewModel: ObservableObject {
+    nonisolated let objectWillChange = ObservableObjectPublisher()
+
+    @Published private(set) var appleUserId: String?
+    @Published private(set) var verification: AppleSignInVerification = .unknown
+
+    private let verifier: AppleSignInVerifying
+    private var verificationTask: Task<Void, Never>?
+
+    init(verifier: AppleSignInVerifying) {
+        self.verifier = verifier
+    }
+
+    var entryScreen: EntryScreen {
+        decideEntryScreen(appleUserId: appleUserId, verification: verification)
+    }
+
+    func setAppleUserId(_ appleUserId: String?) {
+        guard self.appleUserId != appleUserId else { return }
+
+        self.appleUserId = appleUserId
+        verificationTask?.cancel()
+
+        guard let appleUserId else {
+            verification = .unknown
+            return
+        }
+
+        verification = .unknown
+        verificationTask = Task { [weak self, verifier] in
+            let result = await verifier.verify(appleUserId: appleUserId)
+            guard let self, !Task.isCancelled else { return }
+            self.verification = result
+        }
+    }
+}
+
+struct RootView: View {
+    @AppStorage("appleUserId") private var storedAppleUserId: String = ""
+    @StateObject private var viewModel: RootViewModel
+
+    init(verifier: AppleSignInVerifying = AppleIDCredentialStateVerifier()) {
+        _viewModel = StateObject(wrappedValue: RootViewModel(verifier: verifier))
+    }
+
+    var body: some View {
+        Group {
+            switch viewModel.entryScreen {
+            case .signIn:
+                SignInView(storedAppleUserId: $storedAppleUserId)
+            case .verifyingAppleSignIn:
+                VerifyingAppleSignInView()
+            case .home:
+                ContentView()
+            }
+        }
+        .task(id: storedAppleUserId) {
+            let appleUserIdOrNil: String? = storedAppleUserId.isEmpty ? nil : storedAppleUserId
+            await viewModel.setAppleUserId(appleUserIdOrNil)
+        }
+    }
+}
+
+struct SignInView: View {
+    @Binding var storedAppleUserId: String
+
+    #if DEBUG
+    @State private var debugUserId: String = ""
+    #endif
+
+    var body: some View {
+        VStack(spacing: 16) {
+            Text("Sign In")
+                .font(.title)
+
+            Text("Appleでサインイン（未実装）")
+                .foregroundStyle(.secondary)
+
+            #if DEBUG
+            TextField("Debug Apple User ID", text: $debugUserId)
+                .textInputAutocapitalization(.never)
+                .autocorrectionDisabled()
+                .textFieldStyle(.roundedBorder)
+                .padding(.horizontal)
+
+            Button("Debug: Save User ID") {
+                storedAppleUserId = debugUserId
+            }
+
+            Button("Debug: Clear User ID") {
+                storedAppleUserId = ""
+            }
+            #endif
+        }
+        .padding()
+    }
+}
+
+struct VerifyingAppleSignInView: View {
+    var body: some View {
+        VStack(spacing: 16) {
+            ProgressView()
+            Text("Verifying Apple Sign-In…")
+                .foregroundStyle(.secondary)
+        }
+        .padding()
+    }
+}
 
 struct ContentView: View {
     @Environment(\.modelContext) private var modelContext
