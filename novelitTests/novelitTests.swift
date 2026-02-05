@@ -8,10 +8,80 @@
 import Testing
 @testable import novelit
 
+actor ControlledAppleSignInVerifier: AppleSignInVerifying {
+    private(set) var verifyCallCount: Int = 0
+    private(set) var lastUserId: String?
+
+    private var continuation: CheckedContinuation<AppleSignInVerification, Never>?
+
+    func verify(appleUserId: String) async -> AppleSignInVerification {
+        verifyCallCount += 1
+        lastUserId = appleUserId
+        return await withCheckedContinuation { continuation in
+            self.continuation = continuation
+        }
+    }
+
+    func resolve(_ result: AppleSignInVerification) {
+        continuation?.resume(returning: result)
+        continuation = nil
+    }
+}
+
+struct RootViewModelTests {
+    @Test("未ログイン（userIdなし）は.signInで、検証も走らない")
+    func signedOutShowsSignInAndDoesNotVerify() async {
+        let verifier = ControlledAppleSignInVerifier()
+        let viewModel = await RootViewModel(verifier: verifier)
+
+        await viewModel.setAppleUserId(nil)
+
+        let screen = await viewModel.entryScreen
+        #expect(screen == .signIn)
+
+        let callCount = await verifier.verifyCallCount
+        #expect(callCount == 0)
+    }
+
+    @Test("ログイン済み（userIdあり）はまず.verifyingAppleSignInになり、authorizedで.homeへ遷移する")
+    func signedInBecomesVerifyingThenHomeOnAuthorized() async {
+        let verifier = ControlledAppleSignInVerifier()
+        let viewModel = await RootViewModel(verifier: verifier)
+
+        await viewModel.setAppleUserId("u1")
+
+        let initialScreen = await viewModel.entryScreen
+        #expect(initialScreen == .verifyingAppleSignIn)
+
+        let lastUserId = await verifier.lastUserId
+        #expect(lastUserId == "u1")
+
+        await verifier.resolve(.authorized)
+        await Task.yield()
+
+        let finalScreen = await viewModel.entryScreen
+        #expect(finalScreen == .home)
+    }
+
+    @Test("ログイン済み（userIdあり）はunauthorizedで.signInへ戻す（安全側）")
+    func signedInBecomesSignInOnUnauthorized() async {
+        let verifier = ControlledAppleSignInVerifier()
+        let viewModel = await RootViewModel(verifier: verifier)
+
+        await viewModel.setAppleUserId("u1")
+        await verifier.resolve(.unauthorized)
+        await Task.yield()
+
+        let finalScreen = await viewModel.entryScreen
+        #expect(finalScreen == .signIn)
+    }
+}
+
 struct novelitTests {
 
-    @Test func example() async throws {
-        // Write your test here and use APIs like `#expect(...)` to check expected conditions.
+    @Test("ダミーテスト（雛形）")
+    func example() async throws {
+        #expect(true)
     }
 
 }
