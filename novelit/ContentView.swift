@@ -31,6 +31,42 @@ struct AppleIDCredentialStateVerifier: AppleSignInVerifying {
     }
 }
 
+enum AppleUserSessionAction: Equatable {
+    case signInSucceeded(appleUserId: String)
+    case signInFailed
+    case signOut
+}
+
+struct AppleUserSessionState: Equatable {
+    static let signInFailedMessage = "サインインに失敗しました"
+
+    var storedAppleUserId: String
+    var signInErrorMessage: String?
+}
+
+func reduceAppleUserSession(
+    state: AppleUserSessionState,
+    action: AppleUserSessionAction
+) -> AppleUserSessionState {
+    switch action {
+    case .signInSucceeded(let appleUserId):
+        return AppleUserSessionState(
+            storedAppleUserId: appleUserId,
+            signInErrorMessage: nil
+        )
+    case .signInFailed:
+        return AppleUserSessionState(
+            storedAppleUserId: state.storedAppleUserId,
+            signInErrorMessage: AppleUserSessionState.signInFailedMessage
+        )
+    case .signOut:
+        return AppleUserSessionState(
+            storedAppleUserId: "",
+            signInErrorMessage: nil
+        )
+    }
+}
+
 @MainActor
 final class RootViewModel: ObservableObject {
     nonisolated let objectWillChange = ObservableObjectPublisher()
@@ -85,7 +121,7 @@ struct RootView: View {
             case .verifyingAppleSignIn:
                 VerifyingAppleSignInView()
             case .home:
-                ContentView()
+                ContentView(storedAppleUserId: $storedAppleUserId)
             }
         }
         .task(id: storedAppleUserId) {
@@ -97,6 +133,7 @@ struct RootView: View {
 
 struct SignInView: View {
     @Binding var storedAppleUserId: String
+    @State private var signInErrorMessage: String?
 
     #if DEBUG
     @State private var debugUserId: String = ""
@@ -107,8 +144,28 @@ struct SignInView: View {
             Text("Sign In")
                 .font(.title)
 
-            Text("Appleでサインイン（未実装）")
-                .foregroundStyle(.secondary)
+            SignInWithAppleButton(.signIn) { _ in
+            } onCompletion: { result in
+                switch result {
+                case .success(let authorization):
+                    guard let credential = authorization.credential as? ASAuthorizationAppleIDCredential else {
+                        apply(.signInFailed)
+                        return
+                    }
+                    apply(.signInSucceeded(appleUserId: credential.user))
+                case .failure:
+                    apply(.signInFailed)
+                }
+            }
+            .signInWithAppleButtonStyle(.black)
+            .frame(height: 44)
+            .padding(.horizontal)
+
+            if let signInErrorMessage {
+                Text(signInErrorMessage)
+                    .font(.footnote)
+                    .foregroundStyle(.red)
+            }
 
             #if DEBUG
             TextField("Debug Apple User ID", text: $debugUserId)
@@ -118,15 +175,27 @@ struct SignInView: View {
                 .padding(.horizontal)
 
             Button("Debug: Save User ID") {
-                storedAppleUserId = debugUserId
+                apply(.signInSucceeded(appleUserId: debugUserId))
             }
 
             Button("Debug: Clear User ID") {
-                storedAppleUserId = ""
+                apply(.signOut)
             }
             #endif
         }
         .padding()
+    }
+
+    private func apply(_ action: AppleUserSessionAction) {
+        let reduced = reduceAppleUserSession(
+            state: AppleUserSessionState(
+                storedAppleUserId: storedAppleUserId,
+                signInErrorMessage: signInErrorMessage
+            ),
+            action: action
+        )
+        storedAppleUserId = reduced.storedAppleUserId
+        signInErrorMessage = reduced.signInErrorMessage
     }
 }
 
@@ -142,8 +211,14 @@ struct VerifyingAppleSignInView: View {
 }
 
 struct ContentView: View {
+    @Binding var storedAppleUserId: String
+
     @Environment(\.modelContext) private var modelContext
     @Query private var items: [Item]
+
+    init(storedAppleUserId: Binding<String> = .constant("")) {
+        _storedAppleUserId = storedAppleUserId
+    }
 
     var body: some View {
         NavigationSplitView {
@@ -158,6 +233,11 @@ struct ContentView: View {
                 .onDelete(perform: deleteItems)
             }
             .toolbar {
+                ToolbarItem(placement: .navigationBarLeading) {
+                    Button("ログアウト") {
+                        apply(.signOut)
+                    }
+                }
                 ToolbarItem(placement: .navigationBarTrailing) {
                     EditButton()
                 }
@@ -185,6 +265,17 @@ struct ContentView: View {
                 modelContext.delete(items[index])
             }
         }
+    }
+
+    private func apply(_ action: AppleUserSessionAction) {
+        let reduced = reduceAppleUserSession(
+            state: AppleUserSessionState(
+                storedAppleUserId: storedAppleUserId,
+                signInErrorMessage: nil
+            ),
+            action: action
+        )
+        storedAppleUserId = reduced.storedAppleUserId
     }
 }
 

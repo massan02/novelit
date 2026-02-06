@@ -77,6 +77,56 @@ struct RootViewModelTests {
     }
 }
 
+struct AppleUserSessionReducerTests {
+    @Test("サインイン成功でappleUserIdを保存し、エラー表示をクリアする")
+    func signInSuccessStoresAppleUserId() {
+        let state = AppleUserSessionState(
+            storedAppleUserId: "",
+            signInErrorMessage: AppleUserSessionState.signInFailedMessage
+        )
+
+        let reduced = reduceAppleUserSession(
+            state: state,
+            action: .signInSucceeded(appleUserId: "apple-user-1")
+        )
+
+        #expect(reduced.storedAppleUserId == "apple-user-1")
+        #expect(reduced.signInErrorMessage == nil)
+    }
+
+    @Test("サインイン失敗ではappleUserIdを保存しない（既存値を維持）")
+    func signInFailureDoesNotSaveAppleUserId() {
+        let state = AppleUserSessionState(
+            storedAppleUserId: "",
+            signInErrorMessage: nil
+        )
+
+        let reduced = reduceAppleUserSession(
+            state: state,
+            action: .signInFailed
+        )
+
+        #expect(reduced.storedAppleUserId == "")
+        #expect(reduced.signInErrorMessage == AppleUserSessionState.signInFailedMessage)
+    }
+
+    @Test("ログアウトでappleUserIdを削除する")
+    func signOutClearsAppleUserId() {
+        let state = AppleUserSessionState(
+            storedAppleUserId: "apple-user-1",
+            signInErrorMessage: nil
+        )
+
+        let reduced = reduceAppleUserSession(
+            state: state,
+            action: .signOut
+        )
+
+        #expect(reduced.storedAppleUserId == "")
+        #expect(reduced.signInErrorMessage == nil)
+    }
+}
+
 struct novelitTests {
 
     @Test("ダミーテスト（雛形）")
