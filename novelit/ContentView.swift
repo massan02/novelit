@@ -296,8 +296,8 @@ struct ContentView: View {
     var syncStatusRowState: HomeSyncStatusRowState
     var onTapSettings: () -> Void
 
-    @Environment(\.modelContext) private var modelContext
-    @Query private var items: [Item]
+    @Query(sort: \Item.timestamp, order: .reverse) private var items: [Item]
+    @State private var flowState = HomeFlowState()
 
     init(
         storedAppleUserId: Binding<String> = .constant(""),
@@ -310,67 +310,292 @@ struct ContentView: View {
     }
 
     var body: some View {
-        NavigationSplitView {
+        Group {
+            switch flowState.route {
+            case .list:
+                listScreen
+            case .editor(let fileName):
+                EditorScreen(
+                    fileName: fileName,
+                    activePanel: flowState.activePanel,
+                    onBackToList: { applyFlow(.backToList) },
+                    onOpenHistory: { applyFlow(.openHistory) },
+                    onTogglePanel: { panel in applyFlow(.togglePanel(panel)) },
+                    onClosePanel: { applyFlow(.closePanel) }
+                )
+            case .history(let fileName):
+                HistoryScreen(
+                    fileName: fileName,
+                    onBackToEditor: { applyFlow(.backToEditor) }
+                )
+            }
+        }
+    }
+
+    private var listScreen: some View {
+        NavigationStack {
             List {
                 if syncStatusRowState != .hidden {
                     HomeSyncStatusRow(state: syncStatusRowState, onTapSettings: onTapSettings)
                         .listRowSeparator(.hidden)
                 }
 
-                ForEach(items) { item in
-                    NavigationLink {
-                        Text("Item at \(item.timestamp, format: Date.FormatStyle(date: .numeric, time: .standard))")
+                ForEach(documentRows) { row in
+                    Button {
+                        applyFlow(.openEditor(fileName: row.title))
                     } label: {
-                        Text(item.timestamp, format: Date.FormatStyle(date: .numeric, time: .standard))
+                        DocumentRow(row: row)
                     }
+                    .buttonStyle(.plain)
                 }
-                .onDelete(perform: deleteItems)
             }
             .navigationTitle("作品一覧")
             .toolbar {
-                ToolbarItem(placement: .navigationBarLeading) {
-                    Button("ログアウト") {
-                        apply(.signOut)
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button(action: onTapSettings) {
+                        Image(systemName: "gearshape")
                     }
+                    .accessibilityLabel("設定")
                 }
-                ToolbarItem(placement: .navigationBarTrailing) {
-                    EditButton()
-                }
-                ToolbarItem {
-                    Button(action: addItem) {
-                        Label("Add Item", systemImage: "plus")
-                    }
-                }
-            }
-        } detail: {
-            Text("Select an item")
-        }
-    }
-
-    private func addItem() {
-        withAnimation {
-            let newItem = Item(timestamp: Date())
-            modelContext.insert(newItem)
-        }
-    }
-
-    private func deleteItems(offsets: IndexSet) {
-        withAnimation {
-            for index in offsets {
-                modelContext.delete(items[index])
             }
         }
     }
 
-    private func apply(_ action: AppleUserSessionAction) {
-        let reduced = reduceAppleUserSession(
-            state: AppleUserSessionState(
-                storedAppleUserId: storedAppleUserId,
-                signInErrorMessage: nil
-            ),
-            action: action
+    private var documentRows: [DocumentRowData] {
+        if items.isEmpty {
+            return [
+                DocumentRowData(
+                    id: "sample-document",
+                    title: "サンプル作品",
+                    updatedAt: Date(),
+                    kindLabel: "小説"
+                )
+            ]
+        }
+
+        return items.enumerated().map { index, item in
+            DocumentRowData(
+                id: "\(index)-\(item.timestamp.timeIntervalSince1970)",
+                title: "作品\(index + 1)",
+                updatedAt: item.timestamp,
+                kindLabel: "小説"
+            )
+        }
+    }
+
+    private func applyFlow(_ action: HomeFlowAction) {
+        flowState = reduceHomeFlow(state: flowState, action: action)
+    }
+}
+
+private struct DocumentRowData: Identifiable, Equatable {
+    let id: String
+    let title: String
+    let updatedAt: Date
+    let kindLabel: String
+}
+
+private struct DocumentRow: View {
+    let row: DocumentRowData
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 8) {
+            VStack(alignment: .leading, spacing: 4) {
+                Text(row.title)
+                    .font(.headline)
+                    .lineLimit(1)
+
+                Text(row.updatedAt, format: Date.FormatStyle(date: .numeric, time: .shortened))
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+
+                Text(row.kindLabel)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
+            Spacer(minLength: 8)
+
+            Image(systemName: "chevron.right")
+                .font(.footnote)
+                .foregroundStyle(.tertiary)
+                .padding(.top, 4)
+        }
+    }
+}
+
+private struct EditorScreen: View {
+    let fileName: String
+    let activePanel: EditorPanel?
+    let onBackToList: () -> Void
+    let onOpenHistory: () -> Void
+    let onTogglePanel: (EditorPanel) -> Void
+    let onClosePanel: () -> Void
+
+    private var activePanelBinding: Binding<EditorPanel?> {
+        Binding(
+            get: { activePanel },
+            set: { nextValue in
+                if nextValue == nil {
+                    onClosePanel()
+                }
+            }
         )
-        storedAppleUserId = reduced.storedAppleUserId
+    }
+
+    var body: some View {
+        VStack(spacing: 0) {
+            HStack(spacing: 8) {
+                Button(action: onBackToList) {
+                    HStack(spacing: 4) {
+                        Image(systemName: "chevron.left")
+                        Text("戻る")
+                    }
+                }
+
+                Text(fileName)
+                    .font(.headline)
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+
+                Spacer()
+
+                Button("履歴", action: onOpenHistory)
+            }
+            .padding(.horizontal, 16)
+            .padding(.vertical, 12)
+
+            Divider()
+
+            VStack(alignment: .leading, spacing: 12) {
+                Text("エディタ本文（プレースホルダ）")
+                    .font(.body)
+                    .foregroundStyle(.secondary)
+
+                Text("MVP-6: 一覧 -> エディタ -> 履歴の導線を実装")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+
+                Spacer()
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+            .padding(16)
+
+            Divider()
+
+            HStack(spacing: 12) {
+                HStack(spacing: 8) {
+                    panelButton(.explorer)
+                    panelButton(.changes)
+                    panelButton(.graph)
+                }
+
+                Spacer()
+
+                Button(action: {}) {
+                    Label("Branch", systemImage: "arrow.triangle.branch")
+                }
+                .buttonStyle(.borderedProminent)
+            }
+            .padding(.horizontal, 16)
+            .padding(.vertical, 10)
+        }
+        .sheet(item: activePanelBinding) { panel in
+            PanelPlaceholderSheet(
+                panel: panel,
+                onClose: onClosePanel
+            )
+        }
+    }
+
+    private func panelButton(_ panel: EditorPanel) -> some View {
+        let isSelected = activePanel == panel
+
+        return Button(action: { onTogglePanel(panel) }) {
+            Text(panel.displayTitle)
+                .font(.footnote)
+                .padding(.horizontal, 10)
+                .padding(.vertical, 6)
+                .background(isSelected ? Color.accentColor.opacity(0.2) : Color.clear)
+                .clipShape(RoundedRectangle(cornerRadius: 8))
+        }
+        .buttonStyle(.plain)
+        .overlay(
+            RoundedRectangle(cornerRadius: 8)
+                .stroke(Color.secondary.opacity(0.3), lineWidth: 1)
+        )
+    }
+}
+
+private struct PanelPlaceholderSheet: View {
+    let panel: EditorPanel
+    let onClose: () -> Void
+
+    var body: some View {
+        NavigationStack {
+            VStack(spacing: 12) {
+                Text("\(panel.displayTitle) パネル")
+                    .font(.title3)
+                    .fontWeight(.semibold)
+
+                Text("プレースホルダ")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+            }
+            .padding(24)
+            .navigationTitle(panel.displayTitle)
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .topBarLeading) {
+                    Button("閉じる", action: onClose)
+                }
+            }
+        }
+    }
+}
+
+private struct HistoryScreen: View {
+    let fileName: String
+    let onBackToEditor: () -> Void
+
+    var body: some View {
+        VStack(spacing: 0) {
+            HStack(spacing: 8) {
+                Button(action: onBackToEditor) {
+                    HStack(spacing: 4) {
+                        Image(systemName: "chevron.left")
+                        Text("戻る")
+                    }
+                }
+
+                Text("履歴")
+                    .font(.headline)
+
+                Spacer()
+            }
+            .padding(.horizontal, 16)
+            .padding(.vertical, 12)
+
+            Divider()
+
+            VStack(alignment: .leading, spacing: 12) {
+                Text(fileName)
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+
+                Text("履歴ビュー（プレースホルダ）")
+                    .font(.body)
+                    .fontWeight(.semibold)
+
+                Text("・初期版\n・下書き保存")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+
+                Spacer()
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+            .padding(16)
+        }
     }
 }
 
