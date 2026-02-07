@@ -13,6 +13,10 @@ struct novelitApp: App {
     var sharedModelContainer: ModelContainer = {
         let schema = Schema([
             Item.self,
+            Work.self,
+            Node.self,
+            Document.self,
+            Snapshot.self
         ])
         let modelConfiguration = ModelConfiguration(schema: schema, isStoredInMemoryOnly: false)
 
