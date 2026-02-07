@@ -38,6 +38,17 @@ struct HomeFlowReducerTests {
         #expect(reduced.activePanel == .changes)
     }
 
+    @Test("エディタでBranchパネルも開閉できる")
+    func branchPanelCanBeOpenedAndClosed() {
+        let initial = HomeFlowState(route: .editor(fileName: "sample.md"), activePanel: nil)
+
+        let opened = reduceHomeFlow(state: initial, action: .togglePanel(.branch))
+        let closed = reduceHomeFlow(state: opened, action: .togglePanel(.branch))
+
+        #expect(opened.activePanel == .branch)
+        #expect(closed.activePanel == nil)
+    }
+
     @Test("エディタから履歴へ遷移すると編集中ファイル名を引き継ぎ、パネルは閉じる")
     func openHistoryMovesToHistoryKeepingFileName() {
         let initial = HomeFlowState(route: .editor(fileName: "sample.md"), activePanel: .graph)

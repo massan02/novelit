@@ -8,8 +8,9 @@ enum HomeFlowRoute: Equatable {
 
 enum EditorPanel: String, Equatable, CaseIterable, Identifiable {
     case explorer
-    case changes
+    case branch
     case graph
+    case changes
 
     var id: String {
         rawValue
@@ -19,10 +20,12 @@ enum EditorPanel: String, Equatable, CaseIterable, Identifiable {
         switch self {
         case .explorer:
             return "Explorer"
-        case .changes:
-            return "Changes"
+        case .branch:
+            return "Branch"
         case .graph:
             return "Graph"
+        case .changes:
+            return "Changes"
         }
     }
 }

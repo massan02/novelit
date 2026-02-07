@@ -486,14 +486,14 @@ private struct EditorScreen: View {
             HStack(spacing: 12) {
                 HStack(spacing: 8) {
                     panelButton(.explorer)
-                    panelButton(.changes)
+                    panelButton(.branch)
                     panelButton(.graph)
                 }
 
                 Spacer()
 
-                Button(action: {}) {
-                    Label("Branch", systemImage: "arrow.triangle.branch")
+                Button(action: { onTogglePanel(.changes) }) {
+                    Text(EditorPanel.changes.displayTitle)
                 }
                 .buttonStyle(.borderedProminent)
             }
