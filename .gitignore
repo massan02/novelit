@@ -1,5 +1,6 @@
 # Xcode / SwiftPM / Apple platforms
 DerivedData/
+.derived/
 *.xcuserstate
 xcuserdata/
 *.xcscmblueprint
