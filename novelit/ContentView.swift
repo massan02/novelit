@@ -9,6 +9,9 @@ import AuthenticationServices
 import Combine
 import SwiftUI
 import SwiftData
+#if canImport(UIKit)
+import UIKit
+#endif
 
 protocol AppleSignInVerifying {
     func verify(appleUserId: String) async -> AppleSignInVerification
@@ -124,10 +127,18 @@ final class RootViewModel: ObservableObject {
 struct RootView: View {
     @AppStorage("appleUserId") private var storedAppleUserId: String = ""
     @AppStorage("appleUserIdVerificationRevision") private var verificationRevision: Int = 0
+    @State private var homeSyncState: HomeSyncState = .localOnlyBanner
+    @State private var isCheckingICloudStatus: Bool = false
+    @State private var iCloudStatusRequestID: UInt64 = 0
     @StateObject private var viewModel: RootViewModel
+    private let iCloudAccountStatusProvider: ICloudAccountStatusProviding
 
-    init(verifier: AppleSignInVerifying = AppleIDCredentialStateVerifier()) {
+    init(
+        verifier: AppleSignInVerifying = AppleIDCredentialStateVerifier(),
+        iCloudAccountStatusProvider: ICloudAccountStatusProviding = CloudKitICloudAccountStatusProvider()
+    ) {
         _viewModel = StateObject(wrappedValue: RootViewModel(verifier: verifier))
+        self.iCloudAccountStatusProvider = iCloudAccountStatusProvider
     }
 
     var body: some View {
@@ -141,7 +152,22 @@ struct RootView: View {
             case .verifyingAppleSignIn:
                 VerifyingAppleSignInView()
             case .home:
-                ContentView(storedAppleUserId: $storedAppleUserId)
+                switch decideHomeDestination(syncState: homeSyncState) {
+                case .blockedByICloudSignIn:
+                    ICloudSignInRequiredView(
+                        onOpenSettings: openAppSettings,
+                        onRetry: refreshHomeSyncState
+                    )
+                case .home:
+                    ContentView(
+                        storedAppleUserId: $storedAppleUserId,
+                        syncStatusRowState: decideHomeSyncStatusRowState(
+                            syncState: homeSyncState,
+                            isCheckingICloudStatus: isCheckingICloudStatus
+                        ),
+                        onTapSettings: openAppSettings
+                    )
+                }
             }
         }
         .task(id: makeRootTaskID(
@@ -151,6 +177,35 @@ struct RootView: View {
             let appleUserIdOrNil: String? = storedAppleUserId.isEmpty ? nil : storedAppleUserId
             await viewModel.setAppleUserId(appleUserIdOrNil)
         }
+        .task(id: viewModel.entryScreen) {
+            await refreshHomeSyncState()
+        }
+    }
+
+    @MainActor
+    private func refreshHomeSyncState() async {
+        guard viewModel.entryScreen == .home else {
+            iCloudStatusRequestID &+= 1
+            homeSyncState = .localOnlyBanner
+            isCheckingICloudStatus = false
+            return
+        }
+
+        iCloudStatusRequestID &+= 1
+        let requestID = iCloudStatusRequestID
+        homeSyncState = .localOnlyBanner
+        isCheckingICloudStatus = true
+        let accountStatus = await iCloudAccountStatusProvider.currentStatus()
+        guard requestID == iCloudStatusRequestID else {
+            return
+        }
+        guard viewModel.entryScreen == .home else {
+            isCheckingICloudStatus = false
+            return
+        }
+
+        homeSyncState = decideHomeSyncState(accountStatus: accountStatus)
+        isCheckingICloudStatus = false
     }
 }
 
@@ -238,17 +293,30 @@ struct VerifyingAppleSignInView: View {
 
 struct ContentView: View {
     @Binding var storedAppleUserId: String
+    var syncStatusRowState: HomeSyncStatusRowState
+    var onTapSettings: () -> Void
 
     @Environment(\.modelContext) private var modelContext
     @Query private var items: [Item]
 
-    init(storedAppleUserId: Binding<String> = .constant("")) {
+    init(
+        storedAppleUserId: Binding<String> = .constant(""),
+        syncStatusRowState: HomeSyncStatusRowState = .hidden,
+        onTapSettings: @escaping () -> Void = {}
+    ) {
         _storedAppleUserId = storedAppleUserId
+        self.syncStatusRowState = syncStatusRowState
+        self.onTapSettings = onTapSettings
     }
 
     var body: some View {
         NavigationSplitView {
             List {
+                if syncStatusRowState != .hidden {
+                    HomeSyncStatusRow(state: syncStatusRowState, onTapSettings: onTapSettings)
+                        .listRowSeparator(.hidden)
+                }
+
                 ForEach(items) { item in
                     NavigationLink {
                         Text("Item at \(item.timestamp, format: Date.FormatStyle(date: .numeric, time: .standard))")
@@ -258,6 +326,7 @@ struct ContentView: View {
                 }
                 .onDelete(perform: deleteItems)
             }
+            .navigationTitle("作品一覧")
             .toolbar {
                 ToolbarItem(placement: .navigationBarLeading) {
                     Button("ログアウト") {
@@ -303,6 +372,83 @@ struct ContentView: View {
         )
         storedAppleUserId = reduced.storedAppleUserId
     }
+}
+
+struct ICloudSignInRequiredView: View {
+    let onOpenSettings: () -> Void
+    let onRetry: () async -> Void
+
+    var body: some View {
+        VStack(spacing: 16) {
+            Image(systemName: "icloud.slash")
+                .font(.system(size: 40))
+                .foregroundStyle(.secondary)
+
+            Text("iCloudへのサインインが必要です")
+                .font(.title3)
+                .fontWeight(.semibold)
+
+            Text("iCloudにサインインすると同期機能を利用できます。")
+                .multilineTextAlignment(.center)
+                .foregroundStyle(.secondary)
+                .padding(.horizontal)
+
+            Button("設定を開く", action: onOpenSettings)
+                .buttonStyle(.borderedProminent)
+
+            Button("再確認") {
+                Task { await onRetry() }
+            }
+            .buttonStyle(.bordered)
+        }
+        .padding()
+    }
+}
+
+struct HomeSyncStatusRow: View {
+    let state: HomeSyncStatusRowState
+    let onTapSettings: () -> Void
+
+    var body: some View {
+        HStack(spacing: 8) {
+            switch state {
+            case .checkingLocalOnly:
+                ProgressView()
+                    .controlSize(.small)
+
+                Text("iCloud同期を確認中（ローカル保存のみ）")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+
+            case .localOnly:
+                Image(systemName: "icloud.slash")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+
+                Text("同期は現在利用できません（ローカル保存のみ）")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+
+                Spacer(minLength: 8)
+
+                Button("設定", action: onTapSettings)
+                    .font(.footnote)
+
+            case .hidden:
+                EmptyView()
+            }
+        }
+        .padding(.vertical, 4)
+    }
+}
+
+private func openAppSettings() {
+#if canImport(UIKit)
+    guard let url = URL(string: UIApplication.openSettingsURLString) else { return }
+    UIApplication.shared.open(url)
+#endif
 }
 
 #Preview {
