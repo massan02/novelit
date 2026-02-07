@@ -42,6 +42,7 @@ struct AppleUserSessionState: Equatable {
 
     var storedAppleUserId: String
     var signInErrorMessage: String?
+    var verificationRevision: Int = 0
 }
 
 func reduceAppleUserSession(
@@ -52,19 +53,34 @@ func reduceAppleUserSession(
     case .signInSucceeded(let appleUserId):
         return AppleUserSessionState(
             storedAppleUserId: appleUserId,
-            signInErrorMessage: nil
+            signInErrorMessage: nil,
+            verificationRevision: state.verificationRevision + 1
         )
     case .signInFailed:
         return AppleUserSessionState(
             storedAppleUserId: state.storedAppleUserId,
-            signInErrorMessage: AppleUserSessionState.signInFailedMessage
+            signInErrorMessage: AppleUserSessionState.signInFailedMessage,
+            verificationRevision: state.verificationRevision
         )
     case .signOut:
         return AppleUserSessionState(
             storedAppleUserId: "",
-            signInErrorMessage: nil
+            signInErrorMessage: nil,
+            verificationRevision: state.verificationRevision
         )
     }
+}
+
+struct RootTaskID: Equatable, Hashable {
+    let storedAppleUserId: String
+    let verificationRevision: Int
+}
+
+func makeRootTaskID(storedAppleUserId: String, verificationRevision: Int) -> RootTaskID {
+    RootTaskID(
+        storedAppleUserId: storedAppleUserId,
+        verificationRevision: verificationRevision
+    )
 }
 
 @MainActor
@@ -107,6 +123,7 @@ final class RootViewModel: ObservableObject {
 
 struct RootView: View {
     @AppStorage("appleUserId") private var storedAppleUserId: String = ""
+    @AppStorage("appleUserIdVerificationRevision") private var verificationRevision: Int = 0
     @StateObject private var viewModel: RootViewModel
 
     init(verifier: AppleSignInVerifying = AppleIDCredentialStateVerifier()) {
@@ -117,14 +134,20 @@ struct RootView: View {
         Group {
             switch viewModel.entryScreen {
             case .signIn:
-                SignInView(storedAppleUserId: $storedAppleUserId)
+                SignInView(
+                    storedAppleUserId: $storedAppleUserId,
+                    verificationRevision: $verificationRevision
+                )
             case .verifyingAppleSignIn:
                 VerifyingAppleSignInView()
             case .home:
                 ContentView(storedAppleUserId: $storedAppleUserId)
             }
         }
-        .task(id: storedAppleUserId) {
+        .task(id: makeRootTaskID(
+            storedAppleUserId: storedAppleUserId,
+            verificationRevision: verificationRevision
+        )) {
             let appleUserIdOrNil: String? = storedAppleUserId.isEmpty ? nil : storedAppleUserId
             await viewModel.setAppleUserId(appleUserIdOrNil)
         }
@@ -133,6 +156,7 @@ struct RootView: View {
 
 struct SignInView: View {
     @Binding var storedAppleUserId: String
+    @Binding var verificationRevision: Int
     @State private var signInErrorMessage: String?
 
     #if DEBUG
@@ -190,12 +214,14 @@ struct SignInView: View {
         let reduced = reduceAppleUserSession(
             state: AppleUserSessionState(
                 storedAppleUserId: storedAppleUserId,
-                signInErrorMessage: signInErrorMessage
+                signInErrorMessage: signInErrorMessage,
+                verificationRevision: verificationRevision
             ),
             action: action
         )
         storedAppleUserId = reduced.storedAppleUserId
         signInErrorMessage = reduced.signInErrorMessage
+        verificationRevision = reduced.verificationRevision
     }
 }
 

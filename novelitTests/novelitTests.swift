@@ -125,6 +125,33 @@ struct AppleUserSessionReducerTests {
         #expect(reduced.storedAppleUserId == "")
         #expect(reduced.signInErrorMessage == nil)
     }
+
+    @Test("同一appleUserIdで再サインインしたとき再検証用revisionを進める")
+    func signInSuccessWithSameUserIdIncrementsRevision() {
+        let state = AppleUserSessionState(
+            storedAppleUserId: "apple-user-1",
+            signInErrorMessage: nil,
+            verificationRevision: 3
+        )
+
+        let reduced = reduceAppleUserSession(
+            state: state,
+            action: .signInSucceeded(appleUserId: "apple-user-1")
+        )
+
+        #expect(reduced.storedAppleUserId == "apple-user-1")
+        #expect(reduced.verificationRevision == 4)
+    }
+}
+
+struct RootViewTaskIDTests {
+    @Test("同一appleUserIdでもrevisionが変わればtask idが変わる")
+    func taskIDChangesWhenRevisionChanges() {
+        let first = makeRootTaskID(storedAppleUserId: "apple-user-1", verificationRevision: 1)
+        let second = makeRootTaskID(storedAppleUserId: "apple-user-1", verificationRevision: 2)
+
+        #expect(first != second)
+    }
 }
 
 struct novelitTests {
