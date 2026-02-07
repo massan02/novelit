@@ -1,0 +1,62 @@
+import Foundation
+import SwiftData
+import Testing
+@testable import novelit
+
+struct DataModelTests {
+    @Test("標準テンプレートで初期ノード構成を生成する")
+    func standardTemplateCreatesInitialStructure() {
+        let now = Date(timeIntervalSince1970: 1_700_000_000)
+        let work = WorkFactory.create(title: "新規作品", template: .standard, now: now)
+
+        let expected = Set(["content", "outline", "plot", "characters", "info", "snapshots"])
+        let actual = Set(work.rootNodes.map(\Node.name))
+
+        #expect(actual == expected)
+        #expect(work.document(kind: .content) != nil)
+        #expect(work.document(kind: .outline) != nil)
+        #expect(work.document(kind: .plot) != nil)
+        #expect(work.document(kind: .characters) != nil)
+        #expect(work.document(kind: .info) != nil)
+
+        let snapshotsNode = work.rootNodes.first(where: { $0.name == "snapshots" })
+        #expect(snapshotsNode?.kind == .folder)
+        #expect(snapshotsNode?.document == nil)
+    }
+
+    @Test("作品作成後に本文を更新できる")
+    func updateBodyAfterCreatingWork() {
+        let createdAt = Date(timeIntervalSince1970: 1_700_000_000)
+        let updatedAt = Date(timeIntervalSince1970: 1_700_000_100)
+        let work = WorkFactory.create(title: "下書き", template: .standard, now: createdAt)
+
+        let result = work.updateDocument(kind: .content, text: "第一章\nはじまり", now: updatedAt)
+
+        #expect(result)
+        #expect(work.document(kind: .content)?.text == "第一章\nはじまり")
+        #expect(work.updatedAt == updatedAt)
+    }
+
+    @Test("SwiftData in-memoryに作品を保存して再取得できる")
+    func persistAndFetchWorkWithInMemoryContainer() throws {
+        let schema = Schema([
+            Work.self,
+            Node.self,
+            Document.self,
+            Snapshot.self
+        ])
+        let configuration = ModelConfiguration(schema: schema, isStoredInMemoryOnly: true)
+        let container = try ModelContainer(for: schema, configurations: [configuration])
+        let context = ModelContext(container)
+
+        let work = WorkFactory.create(title: "永続化テスト", template: .standard)
+        _ = work.updateDocument(kind: .content, text: "保存される本文")
+        context.insert(work)
+        try context.save()
+
+        let fetchedWorks = try context.fetch(FetchDescriptor<Work>())
+        #expect(fetchedWorks.count == 1)
+        #expect(fetchedWorks.first?.title == "永続化テスト")
+        #expect(fetchedWorks.first?.document(kind: .content)?.text == "保存される本文")
+    }
+}
