@@ -31,6 +31,58 @@ struct AppleIDCredentialStateVerifier: AppleSignInVerifying {
     }
 }
 
+enum AppleUserSessionAction: Equatable {
+    case signInSucceeded(appleUserId: String)
+    case signInFailed
+    case signOut
+}
+
+struct AppleUserSessionState: Equatable {
+    static let signInFailedMessage = "サインインに失敗しました"
+
+    var storedAppleUserId: String
+    var signInErrorMessage: String?
+    var verificationRevision: Int = 0
+}
+
+func reduceAppleUserSession(
+    state: AppleUserSessionState,
+    action: AppleUserSessionAction
+) -> AppleUserSessionState {
+    switch action {
+    case .signInSucceeded(let appleUserId):
+        return AppleUserSessionState(
+            storedAppleUserId: appleUserId,
+            signInErrorMessage: nil,
+            verificationRevision: state.verificationRevision + 1
+        )
+    case .signInFailed:
+        return AppleUserSessionState(
+            storedAppleUserId: state.storedAppleUserId,
+            signInErrorMessage: AppleUserSessionState.signInFailedMessage,
+            verificationRevision: state.verificationRevision
+        )
+    case .signOut:
+        return AppleUserSessionState(
+            storedAppleUserId: "",
+            signInErrorMessage: nil,
+            verificationRevision: state.verificationRevision
+        )
+    }
+}
+
+struct RootTaskID: Equatable, Hashable {
+    let storedAppleUserId: String
+    let verificationRevision: Int
+}
+
+func makeRootTaskID(storedAppleUserId: String, verificationRevision: Int) -> RootTaskID {
+    RootTaskID(
+        storedAppleUserId: storedAppleUserId,
+        verificationRevision: verificationRevision
+    )
+}
+
 @MainActor
 final class RootViewModel: ObservableObject {
     nonisolated let objectWillChange = ObservableObjectPublisher()
@@ -71,6 +123,7 @@ final class RootViewModel: ObservableObject {
 
 struct RootView: View {
     @AppStorage("appleUserId") private var storedAppleUserId: String = ""
+    @AppStorage("appleUserIdVerificationRevision") private var verificationRevision: Int = 0
     @StateObject private var viewModel: RootViewModel
 
     init(verifier: AppleSignInVerifying = AppleIDCredentialStateVerifier()) {
@@ -81,14 +134,20 @@ struct RootView: View {
         Group {
             switch viewModel.entryScreen {
             case .signIn:
-                SignInView(storedAppleUserId: $storedAppleUserId)
+                SignInView(
+                    storedAppleUserId: $storedAppleUserId,
+                    verificationRevision: $verificationRevision
+                )
             case .verifyingAppleSignIn:
                 VerifyingAppleSignInView()
             case .home:
-                ContentView()
+                ContentView(storedAppleUserId: $storedAppleUserId)
             }
         }
-        .task(id: storedAppleUserId) {
+        .task(id: makeRootTaskID(
+            storedAppleUserId: storedAppleUserId,
+            verificationRevision: verificationRevision
+        )) {
             let appleUserIdOrNil: String? = storedAppleUserId.isEmpty ? nil : storedAppleUserId
             await viewModel.setAppleUserId(appleUserIdOrNil)
         }
@@ -97,6 +156,8 @@ struct RootView: View {
 
 struct SignInView: View {
     @Binding var storedAppleUserId: String
+    @Binding var verificationRevision: Int
+    @State private var signInErrorMessage: String?
 
     #if DEBUG
     @State private var debugUserId: String = ""
@@ -107,8 +168,28 @@ struct SignInView: View {
             Text("Sign In")
                 .font(.title)
 
-            Text("Appleでサインイン（未実装）")
-                .foregroundStyle(.secondary)
+            SignInWithAppleButton(.signIn) { _ in
+            } onCompletion: { result in
+                switch result {
+                case .success(let authorization):
+                    guard let credential = authorization.credential as? ASAuthorizationAppleIDCredential else {
+                        apply(.signInFailed)
+                        return
+                    }
+                    apply(.signInSucceeded(appleUserId: credential.user))
+                case .failure:
+                    apply(.signInFailed)
+                }
+            }
+            .signInWithAppleButtonStyle(.black)
+            .frame(height: 44)
+            .padding(.horizontal)
+
+            if let signInErrorMessage {
+                Text(signInErrorMessage)
+                    .font(.footnote)
+                    .foregroundStyle(.red)
+            }
 
             #if DEBUG
             TextField("Debug Apple User ID", text: $debugUserId)
@@ -118,15 +199,29 @@ struct SignInView: View {
                 .padding(.horizontal)
 
             Button("Debug: Save User ID") {
-                storedAppleUserId = debugUserId
+                apply(.signInSucceeded(appleUserId: debugUserId))
             }
 
             Button("Debug: Clear User ID") {
-                storedAppleUserId = ""
+                apply(.signOut)
             }
             #endif
         }
         .padding()
+    }
+
+    private func apply(_ action: AppleUserSessionAction) {
+        let reduced = reduceAppleUserSession(
+            state: AppleUserSessionState(
+                storedAppleUserId: storedAppleUserId,
+                signInErrorMessage: signInErrorMessage,
+                verificationRevision: verificationRevision
+            ),
+            action: action
+        )
+        storedAppleUserId = reduced.storedAppleUserId
+        signInErrorMessage = reduced.signInErrorMessage
+        verificationRevision = reduced.verificationRevision
     }
 }
 
@@ -142,8 +237,14 @@ struct VerifyingAppleSignInView: View {
 }
 
 struct ContentView: View {
+    @Binding var storedAppleUserId: String
+
     @Environment(\.modelContext) private var modelContext
     @Query private var items: [Item]
+
+    init(storedAppleUserId: Binding<String> = .constant("")) {
+        _storedAppleUserId = storedAppleUserId
+    }
 
     var body: some View {
         NavigationSplitView {
@@ -158,6 +259,11 @@ struct ContentView: View {
                 .onDelete(perform: deleteItems)
             }
             .toolbar {
+                ToolbarItem(placement: .navigationBarLeading) {
+                    Button("ログアウト") {
+                        apply(.signOut)
+                    }
+                }
                 ToolbarItem(placement: .navigationBarTrailing) {
                     EditButton()
                 }
@@ -185,6 +291,17 @@ struct ContentView: View {
                 modelContext.delete(items[index])
             }
         }
+    }
+
+    private func apply(_ action: AppleUserSessionAction) {
+        let reduced = reduceAppleUserSession(
+            state: AppleUserSessionState(
+                storedAppleUserId: storedAppleUserId,
+                signInErrorMessage: nil
+            ),
+            action: action
+        )
+        storedAppleUserId = reduced.storedAppleUserId
     }
 }
 
