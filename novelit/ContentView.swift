@@ -330,6 +330,13 @@ struct ContentView: View {
                     onCommitText: { text in
                         saveEditorText(workID: workID, fileName: fileName, text: text)
                     },
+                    onSaveSnapshot: { title, selectedFileNames in
+                        saveSnapshot(
+                            workID: workID,
+                            title: title,
+                            selectedFileNames: selectedFileNames
+                        )
+                    },
                     onOpenEditor: { targetFileName in
                         applyFlow(.openEditor(workID: workID, fileName: targetFileName))
                     }
@@ -561,9 +568,74 @@ struct ContentView: View {
         }
     }
 
+    private func saveSnapshot(
+        workID: UUID?,
+        title: String,
+        selectedFileNames: Set<String>
+    ) -> SnapshotSaveResult {
+        let normalizedTitle = title.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !normalizedTitle.isEmpty else {
+            return .failure("タイトルを入力してください")
+        }
+        guard !selectedFileNames.isEmpty else {
+            return .failure("保存対象のファイルを選択してください")
+        }
+        guard let work = Work.work(in: works, id: workID) else {
+            return .failure("保存対象の作品が見つかりません")
+        }
+
+        let now = Date()
+        let manifestJSON: String
+        do {
+            let manifest = try work.buildSnapshotManifest(
+                selectedFileNames: selectedFileNames,
+                createdAt: now
+            )
+            manifestJSON = try manifest.encodedJSON()
+        } catch SnapshotManifestBuildError.emptySelection {
+            return .failure("保存対象のファイルを選択してください")
+        } catch SnapshotManifestBuildError.unresolvedFileNames {
+            return .failure("選択したファイルの読み込みに失敗しました")
+        } catch {
+            return .failure("manifest の生成に失敗しました")
+        }
+
+        let snapshot = Snapshot(
+            title: normalizedTitle,
+            createdAt: now,
+            deviceName: currentDeviceName(),
+            kind: .manual,
+            manifestJSON: manifestJSON
+        )
+        snapshot.work = work
+        modelContext.insert(snapshot)
+
+        do {
+            try modelContext.save()
+            return .success("保存しました")
+        } catch {
+            modelContext.delete(snapshot)
+            assertionFailure("Failed to save snapshot: \(error)")
+            return .failure("保存に失敗しました")
+        }
+    }
+
+    private func currentDeviceName() -> String {
+        #if canImport(UIKit)
+        UIDevice.current.name
+        #else
+        ""
+        #endif
+    }
+
     private func applyFlow(_ action: HomeFlowAction) {
         flowState = reduceHomeFlow(state: flowState, action: action)
     }
+}
+
+private enum SnapshotSaveResult {
+    case success(String)
+    case failure(String)
 }
 
 private struct DocumentRowData: Identifiable, Equatable {
@@ -614,6 +686,7 @@ private struct EditorScreen: View {
     let onTogglePanel: (EditorPanel) -> Void
     let onClosePanel: () -> Void
     let onCommitText: (String) -> Bool
+    let onSaveSnapshot: (String, Set<String>) -> SnapshotSaveResult
     let onOpenEditor: (String) -> Void
 
     @State private var draftText: String
@@ -634,6 +707,7 @@ private struct EditorScreen: View {
         onTogglePanel: @escaping (EditorPanel) -> Void,
         onClosePanel: @escaping () -> Void,
         onCommitText: @escaping (String) -> Bool,
+        onSaveSnapshot: @escaping (String, Set<String>) -> SnapshotSaveResult,
         onOpenEditor: @escaping (String) -> Void
     ) {
         self.workID = workID
@@ -646,6 +720,7 @@ private struct EditorScreen: View {
         self.onTogglePanel = onTogglePanel
         self.onClosePanel = onClosePanel
         self.onCommitText = onCommitText
+        self.onSaveSnapshot = onSaveSnapshot
         self.onOpenEditor = onOpenEditor
         _draftText = State(initialValue: initialText)
         _lastSavedText = State(initialValue: initialText)
@@ -730,6 +805,7 @@ private struct EditorScreen: View {
                 ChangesPanelSheet(
                     files: changes,
                     onClose: onClosePanel,
+                    onSaveSnapshot: onSaveSnapshot,
                     onOpenEditor: onOpenEditor
                 )
             } else {
@@ -797,16 +873,22 @@ private struct EditorScreen: View {
 
 private struct ChangesPanelSheet: View {
     let onClose: () -> Void
+    let onSaveSnapshot: (String, Set<String>) -> SnapshotSaveResult
     let onOpenEditor: (String) -> Void
 
     @State private var panelState: ChangesPanelState
+    @State private var snapshotTitle: String = ""
+    @State private var saveFeedbackMessage: String?
+    @State private var isSaveFeedbackError: Bool = false
 
     init(
         files: [FileChangeSummary],
         onClose: @escaping () -> Void,
+        onSaveSnapshot: @escaping (String, Set<String>) -> SnapshotSaveResult,
         onOpenEditor: @escaping (String) -> Void
     ) {
         self.onClose = onClose
+        self.onSaveSnapshot = onSaveSnapshot
         self.onOpenEditor = onOpenEditor
         _panelState = State(initialValue: ChangesPanelState(files: files))
     }
@@ -853,6 +935,26 @@ private struct ChangesPanelSheet: View {
             }
             .padding(.horizontal, 16)
             .padding(.vertical, 10)
+
+            VStack(alignment: .leading, spacing: 6) {
+                Text("タイトル（必須）")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+
+                TextField("例: 第1章改稿前", text: $snapshotTitle)
+                    .textFieldStyle(.roundedBorder)
+            }
+            .padding(.horizontal, 16)
+            .padding(.bottom, 10)
+
+            if let saveFeedbackMessage {
+                Text(saveFeedbackMessage)
+                    .font(.footnote)
+                    .foregroundStyle(isSaveFeedbackError ? .red : .green)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.horizontal, 16)
+                    .padding(.bottom, 10)
+            }
 
             Divider()
 
@@ -913,11 +1015,18 @@ private struct ChangesPanelSheet: View {
             }
 
             Button("保存") {
+                saveSnapshotSelection()
             }
             .buttonStyle(.borderedProminent)
-            .disabled(!panelState.canSaveSelection)
+            .disabled(!canSaveSnapshot)
             .frame(maxWidth: .infinity, alignment: .trailing)
             .padding(16)
+        }
+        .onChange(of: snapshotTitle) { _, _ in
+            saveFeedbackMessage = nil
+        }
+        .onChange(of: panelState.selectedFileNames) { _, _ in
+            saveFeedbackMessage = nil
         }
     }
 
@@ -976,6 +1085,27 @@ private struct ChangesPanelSheet: View {
             return .red
         case .unchanged:
             return .primary
+        }
+    }
+
+    private var canSaveSnapshot: Bool {
+        panelState.canSaveSelection && !normalizedTitle.isEmpty
+    }
+
+    private var normalizedTitle: String {
+        snapshotTitle.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private func saveSnapshotSelection() {
+        let selectedFileNames = panelState.selectedFileNames.intersection(panelState.selectableFileNames)
+        let result = onSaveSnapshot(normalizedTitle, selectedFileNames)
+        switch result {
+        case .success(let message):
+            isSaveFeedbackError = false
+            saveFeedbackMessage = message
+        case .failure(let message):
+            isSaveFeedbackError = true
+            saveFeedbackMessage = message
         }
     }
 }
