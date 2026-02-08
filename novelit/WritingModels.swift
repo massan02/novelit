@@ -320,11 +320,17 @@ struct WorkFactory {
 
         switch template {
         case .minimal:
+            addMinimalTemplateNodes(to: work, now: now)
             return work
         case .standard:
             addStandardTemplateNodes(to: work, now: now)
             return work
         }
+    }
+
+    private static func addMinimalTemplateNodes(to work: Work, now: Date) {
+        let contentNode = makeFileNode(name: "content", kind: .content, now: now)
+        work.nodes.append(contentNode)
     }
 
     private static func addStandardTemplateNodes(to work: Work, now: Date) {
@@ -349,4 +355,27 @@ struct WorkFactory {
         node.document = document
         return node
     }
+}
+
+func makeAutoWorkTitle(existingTitles: [String], prefix: String = "作品") -> String {
+    let maxNumber = existingTitles
+        .compactMap { title -> Int? in
+            guard title.hasPrefix(prefix) else {
+                return nil
+            }
+
+            let suffix = title.dropFirst(prefix.count)
+            guard
+                !suffix.isEmpty,
+                suffix.allSatisfy(\.isNumber),
+                let number = Int(suffix)
+            else {
+                return nil
+            }
+
+            return number
+        }
+        .max() ?? 0
+
+    return "\(prefix)\(maxNumber + 1)"
 }

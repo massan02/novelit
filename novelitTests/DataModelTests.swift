@@ -24,6 +24,32 @@ struct DataModelTests {
         #expect(snapshotsNode?.document == nil)
     }
 
+    @Test("ミニマルテンプレートはcontentのみを生成する")
+    func minimalTemplateCreatesContentOnly() {
+        let work = WorkFactory.create(title: "ミニマル作品", template: .minimal)
+
+        #expect(work.rootNodes.count == 1)
+        #expect(work.rootNodes.first?.name == "content")
+        #expect(work.document(kind: .content) != nil)
+        #expect(work.document(kind: .outline) == nil)
+    }
+
+    @Test("自動命名は既存作品タイトルから次の番号を採番する")
+    func autoWorkTitleGeneratesNextNumber() {
+        let title = makeAutoWorkTitle(
+            existingTitles: ["作品1", "メモ", "作品3", "作品X", "作品10"]
+        )
+
+        #expect(title == "作品11")
+    }
+
+    @Test("自動命名は対象タイトルがない場合に作品1を返す")
+    func autoWorkTitleStartsFromOne() {
+        let title = makeAutoWorkTitle(existingTitles: ["下書き", "プロット"])
+
+        #expect(title == "作品1")
+    }
+
     @Test("作品作成後に本文を更新できる")
     func updateBodyAfterCreatingWork() {
         let createdAt = Date(timeIntervalSince1970: 1_700_000_000)
