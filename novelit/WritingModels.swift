@@ -49,6 +49,36 @@ enum SnapshotKind: String, Codable {
     case conflict
 }
 
+struct SnapshotManifest: Codable, Equatable {
+    let version: Int
+    let createdAt: Date
+    let files: [SnapshotManifestFile]
+
+    func encodedJSON() throws -> String {
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .iso8601
+        let data = try encoder.encode(self)
+        guard let encoded = String(data: data, encoding: .utf8) else {
+            throw SnapshotManifestEncodingError.invalidUTF8
+        }
+        return encoded
+    }
+}
+
+struct SnapshotManifestFile: Codable, Equatable {
+    let fileName: String
+    let text: String
+}
+
+enum SnapshotManifestBuildError: Error, Equatable {
+    case emptySelection
+    case unresolvedFileNames([String])
+}
+
+enum SnapshotManifestEncodingError: Error, Equatable {
+    case invalidUTF8
+}
+
 @Model
 final class Work {
     @Attribute(.unique) var id: UUID
@@ -138,6 +168,42 @@ final class Work {
             return false
         }
         return work.updateDocument(fileName: fileName, text: text, now: now)
+    }
+
+    func buildSnapshotManifest(
+        selectedFileNames: Set<String>,
+        createdAt: Date = .now
+    ) throws -> SnapshotManifest {
+        guard !selectedFileNames.isEmpty else {
+            throw SnapshotManifestBuildError.emptySelection
+        }
+
+        var files: [SnapshotManifestFile] = []
+        var unresolved: [String] = []
+
+        for fileName in selectedFileNames.sorted() {
+            guard let document = document(fileName: fileName) else {
+                unresolved.append(fileName)
+                continue
+            }
+
+            files.append(
+                SnapshotManifestFile(
+                    fileName: fileName,
+                    text: document.text
+                )
+            )
+        }
+
+        guard unresolved.isEmpty else {
+            throw SnapshotManifestBuildError.unresolvedFileNames(unresolved)
+        }
+
+        return SnapshotManifest(
+            version: 1,
+            createdAt: createdAt,
+            files: files
+        )
     }
 }
 
