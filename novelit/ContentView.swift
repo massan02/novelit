@@ -297,6 +297,7 @@ struct ContentView: View {
     var onTapSettings: () -> Void
 
     @Query(sort: \Item.timestamp, order: .reverse) private var items: [Item]
+    @Query(sort: \Work.updatedAt, order: .reverse) private var works: [Work]
     @State private var flowState = HomeFlowState()
 
     init(
@@ -314,16 +315,20 @@ struct ContentView: View {
             switch flowState.route {
             case .list:
                 listScreen
-            case .editor(let fileName):
+            case .editor(let workID, let fileName):
                 EditorScreen(
                     fileName: fileName,
+                    changes: makeChangeSummaries(workID: workID, fileName: fileName),
                     activePanel: flowState.activePanel,
                     onBackToList: { applyFlow(.backToList) },
                     onOpenHistory: { applyFlow(.openHistory) },
                     onTogglePanel: { panel in applyFlow(.togglePanel(panel)) },
-                    onClosePanel: { applyFlow(.closePanel) }
+                    onClosePanel: { applyFlow(.closePanel) },
+                    onOpenEditor: { targetFileName in
+                        applyFlow(.openEditor(workID: workID, fileName: targetFileName))
+                    }
                 )
-            case .history(let fileName):
+            case .history(_, let fileName):
                 HistoryScreen(
                     fileName: fileName,
                     onBackToEditor: { applyFlow(.backToEditor) }
@@ -342,7 +347,7 @@ struct ContentView: View {
 
                 ForEach(documentRows) { row in
                     Button {
-                        applyFlow(.openEditor(fileName: row.title))
+                        applyFlow(.openEditor(workID: row.workID, fileName: row.title))
                     } label: {
                         DocumentRow(row: row)
                     }
@@ -362,10 +367,23 @@ struct ContentView: View {
     }
 
     private var documentRows: [DocumentRowData] {
+        if !works.isEmpty {
+            return works.map { work in
+                DocumentRowData(
+                    id: work.id.uuidString,
+                    workID: work.id,
+                    title: work.title,
+                    updatedAt: work.updatedAt,
+                    kindLabel: "小説"
+                )
+            }
+        }
+
         if items.isEmpty {
             return [
                 DocumentRowData(
                     id: "sample-document",
+                    workID: nil,
                     title: "サンプル作品",
                     updatedAt: Date(),
                     kindLabel: "小説"
@@ -376,11 +394,138 @@ struct ContentView: View {
         return items.enumerated().map { index, item in
             DocumentRowData(
                 id: "\(index)-\(item.timestamp.timeIntervalSince1970)",
+                workID: nil,
                 title: "作品\(index + 1)",
                 updatedAt: item.timestamp,
                 kindLabel: "小説"
             )
         }
+    }
+
+    private func makeChangeSummaries(workID: UUID?, fileName: String) -> [FileChangeSummary] {
+        let targetWork: Work?
+        if let workID {
+            targetWork = works.first(where: { $0.id == workID })
+        } else {
+            targetWork = works.first(where: { $0.title == fileName })
+        }
+
+        guard let targetWork else {
+            return [
+                makeFileChangeSummary(
+                    fileName: fileName,
+                    previousText: "",
+                    currentText: ""
+                )
+            ]
+        }
+
+        let summaries = targetWork.nodes
+            .filter { $0.kind == .file }
+            .compactMap { node -> FileChangeSummary? in
+                guard let document = node.document else {
+                    return nil
+                }
+
+                // TODO: Snapshot.manifestJSON から過去テキストを取得して比較する。
+                let previousText = ""
+                return makeFileChangeSummary(
+                    fileName: "\(node.name).md",
+                    previousText: previousText,
+                    currentText: document.text
+                )
+            }
+            .sorted { $0.fileName < $1.fileName }
+
+        if summaries.isEmpty {
+            return [
+                makeFileChangeSummary(
+                    fileName: fileName,
+                    previousText: "",
+                    currentText: ""
+                )
+            ]
+        }
+        return summaries
+    }
+
+    private func makeFileChangeSummary(
+        fileName: String,
+        previousText: String,
+        currentText: String
+    ) -> FileChangeSummary {
+        let diffLines = buildUnifiedDiffLines(previousText: previousText, currentText: currentText)
+        let addedLineCount = diffLines.filter { $0.kind == .added }.count
+        let removedLineCount = diffLines.filter { $0.kind == .removed }.count
+
+        return FileChangeSummary(
+            fileName: fileName,
+            addedLineCount: addedLineCount,
+            removedLineCount: removedLineCount,
+            diffLines: diffLines
+        )
+    }
+
+    private func buildUnifiedDiffLines(previousText: String, currentText: String) -> [UnifiedDiffLine] {
+        let previousLines = splitLines(previousText)
+        let currentLines = splitLines(currentText)
+
+        if previousLines.isEmpty && currentLines.isEmpty {
+            return [UnifiedDiffLine(kind: .unchanged, text: "変更なし")]
+        }
+
+        let m = previousLines.count
+        let n = currentLines.count
+        var lcs = Array(repeating: Array(repeating: 0, count: n + 1), count: m + 1)
+
+        if m > 0, n > 0 {
+            for i in stride(from: m - 1, through: 0, by: -1) {
+                for j in stride(from: n - 1, through: 0, by: -1) {
+                    if previousLines[i] == currentLines[j] {
+                        lcs[i][j] = lcs[i + 1][j + 1] + 1
+                    } else {
+                        lcs[i][j] = max(lcs[i + 1][j], lcs[i][j + 1])
+                    }
+                }
+            }
+        }
+
+        var i = 0
+        var j = 0
+        var result: [UnifiedDiffLine] = []
+
+        while i < m && j < n {
+            if previousLines[i] == currentLines[j] {
+                result.append(UnifiedDiffLine(kind: .unchanged, text: previousLines[i]))
+                i += 1
+                j += 1
+            } else if lcs[i + 1][j] >= lcs[i][j + 1] {
+                result.append(UnifiedDiffLine(kind: .removed, text: previousLines[i]))
+                i += 1
+            } else {
+                result.append(UnifiedDiffLine(kind: .added, text: currentLines[j]))
+                j += 1
+            }
+        }
+
+        while i < m {
+            result.append(UnifiedDiffLine(kind: .removed, text: previousLines[i]))
+            i += 1
+        }
+
+        while j < n {
+            result.append(UnifiedDiffLine(kind: .added, text: currentLines[j]))
+            j += 1
+        }
+
+        return result
+    }
+
+    private func splitLines(_ text: String) -> [String] {
+        guard !text.isEmpty else {
+            return []
+        }
+        return text.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
     }
 
     private func applyFlow(_ action: HomeFlowAction) {
@@ -390,6 +535,7 @@ struct ContentView: View {
 
 private struct DocumentRowData: Identifiable, Equatable {
     let id: String
+    let workID: UUID?
     let title: String
     let updatedAt: Date
     let kindLabel: String
@@ -426,11 +572,13 @@ private struct DocumentRow: View {
 
 private struct EditorScreen: View {
     let fileName: String
+    let changes: [FileChangeSummary]
     let activePanel: EditorPanel?
     let onBackToList: () -> Void
     let onOpenHistory: () -> Void
     let onTogglePanel: (EditorPanel) -> Void
     let onClosePanel: () -> Void
+    let onOpenEditor: (String) -> Void
 
     private var activePanelBinding: Binding<EditorPanel?> {
         Binding(
@@ -501,10 +649,18 @@ private struct EditorScreen: View {
             .padding(.vertical, 10)
         }
         .sheet(item: activePanelBinding) { panel in
-            PanelPlaceholderSheet(
-                panel: panel,
-                onClose: onClosePanel
-            )
+            if panel == .changes {
+                ChangesPanelSheet(
+                    files: changes,
+                    onClose: onClosePanel,
+                    onOpenEditor: onOpenEditor
+                )
+            } else {
+                PanelPlaceholderSheet(
+                    panel: panel,
+                    onClose: onClosePanel
+                )
+            }
         }
     }
 
@@ -524,6 +680,191 @@ private struct EditorScreen: View {
             RoundedRectangle(cornerRadius: 8)
                 .stroke(Color.secondary.opacity(0.3), lineWidth: 1)
         )
+    }
+}
+
+private struct ChangesPanelSheet: View {
+    let onClose: () -> Void
+    let onOpenEditor: (String) -> Void
+
+    @State private var panelState: ChangesPanelState
+
+    init(
+        files: [FileChangeSummary],
+        onClose: @escaping () -> Void,
+        onOpenEditor: @escaping (String) -> Void
+    ) {
+        self.onClose = onClose
+        self.onOpenEditor = onOpenEditor
+        _panelState = State(initialValue: ChangesPanelState(files: files))
+    }
+
+    var body: some View {
+        NavigationStack {
+            VStack(spacing: 0) {
+                if let diffFile = panelState.diffFile {
+                    diffContent(for: diffFile)
+                } else {
+                    listContent
+                }
+            }
+            .navigationTitle(EditorPanel.changes.displayTitle)
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .topBarLeading) {
+                    if panelState.diffFile != nil {
+                        Button("戻る") {
+                            panelState = reduceChangesPanel(state: panelState, action: .closeDiff)
+                        }
+                    } else {
+                        Button("閉じる", action: onClose)
+                    }
+                }
+            }
+        }
+    }
+
+    private var listContent: some View {
+        VStack(spacing: 0) {
+            HStack(spacing: 16) {
+                Spacer()
+
+                Button("すべて選択") {
+                    panelState = reduceChangesPanel(state: panelState, action: .selectAll)
+                }
+                .font(.footnote)
+
+                Button("すべて解除") {
+                    panelState = reduceChangesPanel(state: panelState, action: .clearAll)
+                }
+                .font(.footnote)
+            }
+            .padding(.horizontal, 16)
+            .padding(.vertical, 10)
+
+            Divider()
+
+            ScrollView {
+                if panelState.files.isEmpty {
+                    Text("変更はありません")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                        .frame(maxWidth: .infinity, alignment: .center)
+                        .padding(.vertical, 24)
+                } else {
+                    LazyVStack(spacing: 0) {
+                        ForEach(panelState.files) { file in
+                            HStack(spacing: 10) {
+                                Button {
+                                    panelState = reduceChangesPanel(
+                                        state: panelState,
+                                        action: .toggleFileSelection(fileName: file.fileName)
+                                    )
+                                } label: {
+                                    Image(systemName: panelState.selectedFileNames.contains(file.fileName) ? "checkmark.square.fill" : "square")
+                                        .foregroundStyle(panelState.selectedFileNames.contains(file.fileName) ? Color.accentColor : Color.secondary)
+                                }
+                                .buttonStyle(.plain)
+                                .accessibilityLabel("\(file.fileName) を選択")
+
+                                Text(file.fileName)
+                                    .font(.body)
+                                    .lineLimit(1)
+                                    .truncationMode(.middle)
+
+                                Spacer(minLength: 8)
+
+                                Text(file.changeLabel)
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+
+                                Button {
+                                    panelState = reduceChangesPanel(
+                                        state: panelState,
+                                        action: .openDiff(fileName: file.fileName)
+                                    )
+                                } label: {
+                                    Image(systemName: "chevron.right")
+                                        .font(.footnote)
+                                        .foregroundStyle(.secondary)
+                                }
+                                .buttonStyle(.plain)
+                                .accessibilityLabel("\(file.fileName) の差分を表示")
+                            }
+                            .padding(.horizontal, 16)
+                            .padding(.vertical, 12)
+
+                            Divider()
+                        }
+                    }
+                }
+            }
+
+            Button("保存") {
+            }
+            .buttonStyle(.borderedProminent)
+            .disabled(!panelState.canSaveSelection)
+            .frame(maxWidth: .infinity, alignment: .trailing)
+            .padding(16)
+        }
+    }
+
+    private func diffContent(for file: FileChangeSummary) -> some View {
+        VStack(spacing: 0) {
+            HStack {
+                Text(file.fileName)
+                    .font(.headline)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                Spacer()
+            }
+            .padding(.horizontal, 16)
+            .padding(.vertical, 12)
+
+            Divider()
+
+            ScrollView {
+                LazyVStack(alignment: .leading, spacing: 2) {
+                    ForEach(Array(file.diffLines.enumerated()), id: \.offset) { _, line in
+                        HStack(alignment: .firstTextBaseline, spacing: 8) {
+                            Text(line.kind.symbol)
+                                .font(.system(.body, design: .monospaced))
+                                .foregroundStyle(color(for: line.kind))
+
+                            Text(line.text.isEmpty ? " " : line.text)
+                                .font(.system(.body, design: .monospaced))
+                                .foregroundStyle(color(for: line.kind))
+
+                            Spacer(minLength: 0)
+                        }
+                        .padding(.horizontal, 16)
+                        .padding(.vertical, 1)
+                    }
+                }
+                .padding(.vertical, 8)
+            }
+
+            Divider()
+
+            Button("このファイルを開く") {
+                onOpenEditor(file.fileName)
+                onClose()
+            }
+            .buttonStyle(.borderedProminent)
+            .frame(maxWidth: .infinity, alignment: .trailing)
+            .padding(16)
+        }
+    }
+
+    private func color(for kind: UnifiedDiffLineKind) -> Color {
+        switch kind {
+        case .added:
+            return .green
+        case .removed:
+            return .red
+        case .unchanged:
+            return .primary
+        }
     }
 }
 
@@ -678,5 +1019,5 @@ private func openAppSettings() {
 
 #Preview {
     ContentView()
-        .modelContainer(for: Item.self, inMemory: true)
+        .modelContainer(for: [Item.self, Work.self, Node.self, Document.self, Snapshot.self], inMemory: true)
 }
