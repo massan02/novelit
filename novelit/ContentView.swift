@@ -300,6 +300,7 @@ struct ContentView: View {
     @Query(sort: \Item.timestamp, order: .reverse) private var items: [Item]
     @Query(sort: \Work.updatedAt, order: .reverse) private var works: [Work]
     @State private var flowState = HomeFlowState()
+    @State private var isPresentingTemplateSheet = false
 
     init(
         storedAppleUserId: Binding<String> = .constant(""),
@@ -370,10 +371,25 @@ struct ContentView: View {
             .navigationTitle("作品一覧")
             .toolbar {
                 ToolbarItem(placement: .topBarTrailing) {
-                    Button(action: onTapSettings) {
-                        Image(systemName: "gearshape")
+                    HStack(spacing: 12) {
+                        Button {
+                            isPresentingTemplateSheet = true
+                        } label: {
+                            Image(systemName: "plus")
+                        }
+                        .accessibilityLabel("新規作成")
+
+                        Button(action: onTapSettings) {
+                            Image(systemName: "gearshape")
+                        }
+                        .accessibilityLabel("設定")
                     }
-                    .accessibilityLabel("設定")
+                }
+            }
+            .sheet(isPresented: $isPresentingTemplateSheet) {
+                NewWorkTemplateSheet { template in
+                    isPresentingTemplateSheet = false
+                    createWork(template: template)
                 }
             }
         }
@@ -536,6 +552,24 @@ struct ContentView: View {
         return text.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
     }
 
+    private func createWork(template: WorkTemplate) {
+        let title = makeAutoWorkTitle(existingTitles: works.map(\.title))
+        let work = WorkFactory.create(
+            title: title,
+            template: template,
+            now: Date()
+        )
+        modelContext.insert(work)
+
+        do {
+            try modelContext.save()
+            applyFlow(.openEditor(workID: work.id, fileName: DocumentKind.content.fileName))
+        } catch {
+            modelContext.delete(work)
+            assertionFailure("Failed to create work: \(error)")
+        }
+    }
+
     private func initialEditorFileName(for row: DocumentRowData) -> String {
         guard row.workID != nil else {
             return row.title
@@ -636,6 +670,25 @@ struct ContentView: View {
 private enum SnapshotSaveResult {
     case success(String)
     case failure(String)
+}
+
+private struct NewWorkTemplateSheet: View {
+    let onSelectTemplate: (WorkTemplate) -> Void
+
+    var body: some View {
+        NavigationStack {
+            List {
+                Button("標準") {
+                    onSelectTemplate(.standard)
+                }
+                Button("ミニマル") {
+                    onSelectTemplate(.minimal)
+                }
+            }
+            .navigationTitle("テンプレート選択")
+            .navigationBarTitleDisplayMode(.inline)
+        }
+    }
 }
 
 private struct DocumentRowData: Identifiable, Equatable {
