@@ -17,6 +17,31 @@ enum DocumentKind: String, Codable, CaseIterable {
     case plot
     case characters
     case info
+
+    var fileName: String {
+        "\(rawValue).md"
+    }
+
+    init?(fileName: String) {
+        let normalized = fileName
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+
+        switch normalized {
+        case "content", "content.md":
+            self = .content
+        case "outline", "outline.md":
+            self = .outline
+        case "plot", "plot.md":
+            self = .plot
+        case "characters", "characters.md":
+            self = .characters
+        case "info", "info.md":
+            self = .info
+        default:
+            return nil
+        }
+    }
 }
 
 enum SnapshotKind: String, Codable {
@@ -59,6 +84,13 @@ final class Work {
             .first { $0.kind == kind }
     }
 
+    func document(fileName: String) -> Document? {
+        guard let kind = DocumentKind(fileName: fileName) else {
+            return nil
+        }
+        return document(kind: kind)
+    }
+
     @discardableResult
     func updateDocument(kind: DocumentKind, text: String, now: Date = .now) -> Bool {
         guard let document = document(kind: kind) else {
@@ -70,6 +102,42 @@ final class Work {
         document.node?.updatedAt = now
         updatedAt = now
         return true
+    }
+
+    @discardableResult
+    func updateDocument(fileName: String, text: String, now: Date = .now) -> Bool {
+        guard let kind = DocumentKind(fileName: fileName) else {
+            return false
+        }
+        return updateDocument(kind: kind, text: text, now: now)
+    }
+
+    static func work(in works: [Work], id: UUID?) -> Work? {
+        guard let id else {
+            return nil
+        }
+        return works.first { $0.id == id }
+    }
+
+    static func document(in works: [Work], workID: UUID?, fileName: String) -> Document? {
+        guard let work = work(in: works, id: workID) else {
+            return nil
+        }
+        return work.document(fileName: fileName)
+    }
+
+    @discardableResult
+    static func updateDocument(
+        in works: [Work],
+        workID: UUID?,
+        fileName: String,
+        text: String,
+        now: Date = .now
+    ) -> Bool {
+        guard let work = work(in: works, id: workID) else {
+            return false
+        }
+        return work.updateDocument(fileName: fileName, text: text, now: now)
     }
 }
 

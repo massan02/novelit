@@ -37,6 +37,61 @@ struct DataModelTests {
         #expect(work.updatedAt == updatedAt)
     }
 
+    @Test("fileNameから対象Documentを解決できる")
+    func resolveDocumentByFileName() {
+        let work = WorkFactory.create(title: "解決テスト", template: .standard)
+
+        #expect(work.document(fileName: "content.md")?.kind == .content)
+        #expect(work.document(fileName: "outline.md")?.kind == .outline)
+        #expect(work.document(fileName: "unknown.md") == nil)
+    }
+
+    @Test("fileName指定で本文更新が反映される")
+    func updateDocumentByFileName() {
+        let createdAt = Date(timeIntervalSince1970: 1_700_000_000)
+        let updatedAt = Date(timeIntervalSince1970: 1_700_000_200)
+        let work = WorkFactory.create(title: "更新テスト", template: .standard, now: createdAt)
+
+        let result = work.updateDocument(
+            fileName: "content.md",
+            text: "第二章\nつづき",
+            now: updatedAt
+        )
+
+        #expect(result)
+        #expect(work.document(kind: .content)?.text == "第二章\nつづき")
+        #expect(work.updatedAt == updatedAt)
+    }
+
+    @Test("workID前提で更新対象を絞り、同名作品でも誤保存しない")
+    func updateDocumentRequiresWorkIDContext() {
+        let base = Date(timeIntervalSince1970: 1_700_000_000)
+        let updated = Date(timeIntervalSince1970: 1_700_000_300)
+        let first = WorkFactory.create(title: "同名作品", template: .standard, now: base)
+        let second = WorkFactory.create(title: "同名作品", template: .standard, now: base)
+        let works = [first, second]
+
+        let missingWorkIDResult = Work.updateDocument(
+            in: works,
+            workID: nil,
+            fileName: "content.md",
+            text: "保存されない本文",
+            now: updated
+        )
+        let updateSecondResult = Work.updateDocument(
+            in: works,
+            workID: second.id,
+            fileName: "content.md",
+            text: "保存される本文",
+            now: updated
+        )
+
+        #expect(missingWorkIDResult == false)
+        #expect(updateSecondResult)
+        #expect(first.document(kind: .content)?.text == "")
+        #expect(second.document(kind: .content)?.text == "保存される本文")
+    }
+
     @Test("SwiftData in-memoryに作品を保存して再取得できる")
     func persistAndFetchWorkWithInMemoryContainer() throws {
         let schema = Schema([
