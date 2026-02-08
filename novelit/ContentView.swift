@@ -296,6 +296,7 @@ struct ContentView: View {
     var syncStatusRowState: HomeSyncStatusRowState
     var onTapSettings: () -> Void
 
+    @Environment(\.modelContext) private var modelContext
     @Query(sort: \Item.timestamp, order: .reverse) private var items: [Item]
     @Query(sort: \Work.updatedAt, order: .reverse) private var works: [Work]
     @State private var flowState = HomeFlowState()
@@ -317,13 +318,18 @@ struct ContentView: View {
                 listScreen
             case .editor(let workID, let fileName):
                 EditorScreen(
+                    workID: workID,
                     fileName: fileName,
+                    initialText: editorInitialText(workID: workID, fileName: fileName),
                     changes: makeChangeSummaries(workID: workID, fileName: fileName),
                     activePanel: flowState.activePanel,
                     onBackToList: { applyFlow(.backToList) },
                     onOpenHistory: { applyFlow(.openHistory) },
                     onTogglePanel: { panel in applyFlow(.togglePanel(panel)) },
                     onClosePanel: { applyFlow(.closePanel) },
+                    onCommitText: { text in
+                        saveEditorText(workID: workID, fileName: fileName, text: text)
+                    },
                     onOpenEditor: { targetFileName in
                         applyFlow(.openEditor(workID: workID, fileName: targetFileName))
                     }
@@ -347,7 +353,7 @@ struct ContentView: View {
 
                 ForEach(documentRows) { row in
                     Button {
-                        applyFlow(.openEditor(workID: row.workID, fileName: row.title))
+                        applyFlow(.openEditor(workID: row.workID, fileName: initialEditorFileName(for: row)))
                     } label: {
                         DocumentRow(row: row)
                     }
@@ -403,12 +409,7 @@ struct ContentView: View {
     }
 
     private func makeChangeSummaries(workID: UUID?, fileName: String) -> [FileChangeSummary] {
-        let targetWork: Work?
-        if let workID {
-            targetWork = works.first(where: { $0.id == workID })
-        } else {
-            targetWork = works.first(where: { $0.title == fileName })
-        }
+        let targetWork = Work.work(in: works, id: workID)
 
         guard let targetWork else {
             return [
@@ -430,7 +431,7 @@ struct ContentView: View {
                 // TODO: Snapshot.manifestJSON から過去テキストを取得して比較する。
                 let previousText = ""
                 return makeFileChangeSummary(
-                    fileName: "\(node.name).md",
+                    fileName: document.kind.fileName,
                     previousText: previousText,
                     currentText: document.text
                 )
@@ -528,6 +529,38 @@ struct ContentView: View {
         return text.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
     }
 
+    private func initialEditorFileName(for row: DocumentRowData) -> String {
+        guard row.workID != nil else {
+            return row.title
+        }
+        return DocumentKind.content.fileName
+    }
+
+    private func editorInitialText(workID: UUID?, fileName: String) -> String {
+        Work.document(in: works, workID: workID, fileName: fileName)?.text ?? ""
+    }
+
+    @discardableResult
+    private func saveEditorText(workID: UUID?, fileName: String, text: String) -> Bool {
+        let didUpdate = Work.updateDocument(
+            in: works,
+            workID: workID,
+            fileName: fileName,
+            text: text
+        )
+        guard didUpdate else {
+            return false
+        }
+
+        do {
+            try modelContext.save()
+            return true
+        } catch {
+            assertionFailure("Failed to save editor text: \(error)")
+            return false
+        }
+    }
+
     private func applyFlow(_ action: HomeFlowAction) {
         flowState = reduceHomeFlow(state: flowState, action: action)
     }
@@ -571,14 +604,57 @@ private struct DocumentRow: View {
 }
 
 private struct EditorScreen: View {
+    let workID: UUID?
     let fileName: String
+    let initialText: String
     let changes: [FileChangeSummary]
     let activePanel: EditorPanel?
     let onBackToList: () -> Void
     let onOpenHistory: () -> Void
     let onTogglePanel: (EditorPanel) -> Void
     let onClosePanel: () -> Void
+    let onCommitText: (String) -> Bool
     let onOpenEditor: (String) -> Void
+
+    @State private var draftText: String
+    @State private var lastSavedText: String
+    @State private var debounceTask: Task<Void, Never>?
+    @State private var commitHandler: (String) -> Bool
+
+    private let debounceNanoseconds: UInt64 = 400_000_000
+
+    init(
+        workID: UUID?,
+        fileName: String,
+        initialText: String,
+        changes: [FileChangeSummary],
+        activePanel: EditorPanel?,
+        onBackToList: @escaping () -> Void,
+        onOpenHistory: @escaping () -> Void,
+        onTogglePanel: @escaping (EditorPanel) -> Void,
+        onClosePanel: @escaping () -> Void,
+        onCommitText: @escaping (String) -> Bool,
+        onOpenEditor: @escaping (String) -> Void
+    ) {
+        self.workID = workID
+        self.fileName = fileName
+        self.initialText = initialText
+        self.changes = changes
+        self.activePanel = activePanel
+        self.onBackToList = onBackToList
+        self.onOpenHistory = onOpenHistory
+        self.onTogglePanel = onTogglePanel
+        self.onClosePanel = onClosePanel
+        self.onCommitText = onCommitText
+        self.onOpenEditor = onOpenEditor
+        _draftText = State(initialValue: initialText)
+        _lastSavedText = State(initialValue: initialText)
+        _commitHandler = State(initialValue: onCommitText)
+    }
+
+    private var editorIdentity: String {
+        "\(workID?.uuidString ?? "nil"):\(fileName)"
+    }
 
     private var activePanelBinding: Binding<EditorPanel?> {
         Binding(
@@ -615,19 +691,20 @@ private struct EditorScreen: View {
 
             Divider()
 
-            VStack(alignment: .leading, spacing: 12) {
-                Text("エディタ本文（プレースホルダ）")
-                    .font(.body)
-                    .foregroundStyle(.secondary)
-
-                Text("MVP-6: 一覧 -> エディタ -> 履歴の導線を実装")
-                    .font(.footnote)
-                    .foregroundStyle(.secondary)
-
-                Spacer()
-            }
-            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-            .padding(16)
+            TextEditor(text: $draftText)
+                .padding(12)
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+                .onChange(of: draftText) { _, newValue in
+                    scheduleDebouncedSave(for: newValue)
+                }
+                .onChange(of: editorIdentity) { _, _ in
+                    flushPendingSave()
+                    resetDraftText()
+                    commitHandler = onCommitText
+                }
+                .onDisappear {
+                    flushPendingSave()
+                }
 
             Divider()
 
@@ -680,6 +757,41 @@ private struct EditorScreen: View {
             RoundedRectangle(cornerRadius: 8)
                 .stroke(Color.secondary.opacity(0.3), lineWidth: 1)
         )
+    }
+
+    private func scheduleDebouncedSave(for text: String) {
+        debounceTask?.cancel()
+        debounceTask = Task {
+            try? await Task.sleep(nanoseconds: debounceNanoseconds)
+            guard !Task.isCancelled else {
+                return
+            }
+
+            await MainActor.run {
+                commitIfNeeded(text)
+            }
+        }
+    }
+
+    private func flushPendingSave() {
+        debounceTask?.cancel()
+        commitIfNeeded(draftText)
+    }
+
+    private func resetDraftText() {
+        debounceTask?.cancel()
+        draftText = initialText
+        lastSavedText = initialText
+    }
+
+    private func commitIfNeeded(_ text: String) {
+        guard text != lastSavedText else {
+            return
+        }
+        guard commitHandler(text) else {
+            return
+        }
+        lastSavedText = text
     }
 }
 
